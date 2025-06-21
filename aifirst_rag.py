@@ -173,6 +173,10 @@ if st.button("Get RAG Answer", disabled=not user_query.strip()):
 chunks = []
 current_chunk = ""
 
+# Read the file content first
+with open('rag_dummy_data.txt', 'r', encoding='utf-8') as file:
+    text = file.read()
+
 # Split the text by participant markers
 participant_sections = text.split("PARTICIPANT_")[1:]  # Skip first empty element
 
@@ -241,3 +245,5 @@ for i, section in enumerate(participant_sections, 1):
 
 # Reset for any remaining content
 current_chunk = ""
+
+print(f"Created {len(chunks)} chunks")
