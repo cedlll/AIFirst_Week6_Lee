@@ -170,80 +170,93 @@ if st.button("Get RAG Answer", disabled=not user_query.strip()):
     except Exception as e:
         st.error(f"❌ Error during RAG answering: {e}")
 
-chunks = []
-current_chunk = ""
+import streamlit as st
 
-# Read the file content first
-with open('rag_dummy_data.txt', 'r', encoding='utf-8') as file:
-    text = file.read()
+# Streamlit file uploader
+uploaded_file = st.file_uploader("Choose a file", type="txt")
 
-# Split the text by participant markers
-participant_sections = text.split("PARTICIPANT_")[1:]  # Skip first empty element
-
-for i, section in enumerate(participant_sections, 1):
-    # Check if this is engagement data section
-    if section.strip().startswith("=== ENGAGEMENT TRACKING DATA ==="):
-        # Handle engagement data separately
-        engagement_lines = section.split('\n')
-        current_participant = None
-        
-        for line in engagement_lines:
-            if line.strip().startswith("PARTICIPANT_") and "Engagement History:" in line:
-                # Save previous engagement chunk if exists
-                if current_chunk:
-                    chunks.append({
-                        "content": current_chunk.strip(),
-                        "metadata": {
-                            "chunk_type": "engagement_data",
-                            "participant_id": current_participant
-                        }
-                    })
-                
-                # Start new engagement chunk
-                current_participant = line.split()[0]
-                current_chunk = line + "\n"
-            elif current_participant and line.strip():
-                current_chunk += line + "\n"
-        
-        # Add final engagement chunk
-        if current_chunk:
+if uploaded_file is not None:
+    chunks = []
+    current_chunk = ""
+    
+    # Read the uploaded file content
+    text = uploaded_file.read().decode('utf-8')
+    
+    # Split the text by participant markers
+    participant_sections = text.split("PARTICIPANT_")[1:]  # Skip first empty element
+    
+    for i, section in enumerate(participant_sections, 1):
+        # Check if this is engagement data section
+        if section.strip().startswith("=== ENGAGEMENT TRACKING DATA ==="):
+            # Handle engagement data separately
+            engagement_lines = section.split('\n')
+            current_participant = None
+            
+            for line in engagement_lines:
+                if line.strip().startswith("PARTICIPANT_") and "Engagement History:" in line:
+                    # Save previous engagement chunk if exists
+                    if current_chunk:
+                        chunks.append({
+                            "content": current_chunk.strip(),
+                            "metadata": {
+                                "chunk_type": "engagement_data",
+                                "participant_id": current_participant
+                            }
+                        })
+                    
+                    # Start new engagement chunk
+                    current_participant = line.split()[0]
+                    current_chunk = line + "\n"
+                elif current_participant and line.strip():
+                    current_chunk += line + "\n"
+            
+            # Add final engagement chunk
+            if current_chunk:
+                chunks.append({
+                    "content": current_chunk.strip(),
+                    "metadata": {
+                        "chunk_type": "engagement_data",
+                        "participant_id": current_participant
+                    }
+                })
+        else:
+            # Handle regular participant profile
+            participant_content = "PARTICIPANT_" + section
+            
+            # Extract metadata from the content
+            lines = section.split('\n')
+            name = ""
+            location = ""
+            occupation = ""
+            
+            for line in lines:
+                if line.startswith("Name:"):
+                    name = line.replace("Name:", "").strip()
+                elif line.startswith("Location:"):
+                    location = line.replace("Location:", "").strip()
+                elif line.startswith("Occupation:"):
+                    occupation = line.replace("Occupation:", "").strip()
+            
             chunks.append({
-                "content": current_chunk.strip(),
+                "content": participant_content.strip(),
                 "metadata": {
-                    "chunk_type": "engagement_data",
-                    "participant_id": current_participant
+                    "participant_id": f"PARTICIPANT_{i:03d}",
+                    "participant_name": name,
+                    "location": location,
+                    "occupation": occupation,
+                    "chunk_type": "participant_profile"
                 }
             })
-    else:
-        # Handle regular participant profile
-        participant_content = "PARTICIPANT_" + section
-        
-        # Extract metadata from the content
-        lines = section.split('\n')
-        name = ""
-        location = ""
-        occupation = ""
-        
-        for line in lines:
-            if line.startswith("Name:"):
-                name = line.replace("Name:", "").strip()
-            elif line.startswith("Location:"):
-                location = line.replace("Location:", "").strip()
-            elif line.startswith("Occupation:"):
-                occupation = line.replace("Occupation:", "").strip()
-        
-        chunks.append({
-            "content": participant_content.strip(),
-            "metadata": {
-                "participant_id": f"PARTICIPANT_{i:03d}",
-                "participant_name": name,
-                "location": location,
-                "occupation": occupation,
-                "chunk_type": "participant_profile"
-            }
-        })
-
-# Reset for any remaining content
-current_chunk = ""
-
-print(f"Created {len(chunks)} chunks")
+    
+    # Reset for any remaining content
+    current_chunk = ""
+    
+    st.success(f"Created {len(chunks)} chunks")
+    
+    # Optional: Display some chunks for verification
+    if st.checkbox("Show sample chunks"):
+        for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
+            st.write(f"**Chunk {i+1}:**")
+            st.write(chunk["content"][:200] + "..." if len(chunk["content"]) > 200 else chunk["content"])
+            st.write("Metadata:", chunk["metadata"])
+            st.write("---")
