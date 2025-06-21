@@ -11,9 +11,8 @@ import uuid
 import re
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="AIFirst RAG Assistant", page_icon="📚", layout="wide")
-st.title("🔍 AIFirst RAG Assistant")
-st.markdown("Upload PDFs, DOCX, Excel, TXT, and more — then ask natural language questions.")
+st.set_page_config(page_title="Participant Finder", page_icon="🔍", layout="wide")
+st.title("🔍 Participant Matcher")
 
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.title("🔐 Configuration")
@@ -351,7 +350,7 @@ else:
 
 user_query = st.text_input("Enter your question:", placeholder="e.g., give me the names of those with at least 50% response rate")
 
-if st.button("Get RAG Answer", disabled=not user_query.strip() or not st.session_state.get("data_loaded")):
+if st.button("Find now", disabled=not user_query.strip() or not st.session_state.get("data_loaded")):
     try:
         with st.spinner("🔍 Searching for relevant information..."):
             # Generate query embedding
@@ -444,7 +443,3 @@ Provide a clear, structured answer based ONLY on the information explicitly prov
     except Exception as e:
         st.error(f"❌ Error during RAG query: {e}")
         st.write("Debug info:", str(e))
-
-# --- FOOTER ---
-st.markdown("---")
-st.markdown("*AIFirst RAG Assistant - Built with Streamlit, OpenAI, and Qdrant*")
