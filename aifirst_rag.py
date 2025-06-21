@@ -8,6 +8,7 @@ import docx
 import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
 import uuid
+import re
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AIFirst RAG Assistant", page_icon="📚", layout="wide")
@@ -26,9 +27,9 @@ qdrant_url_input = st.sidebar.text_input(
 )
 
 # Session state defaults
-for key in ["openai_valid", "qdrant_valid", "qdrant_client", "openai_client"]:
+for key in ["openai_valid", "qdrant_valid", "qdrant_client", "openai_client", "data_loaded"]:
     if key not in st.session_state:
-        st.session_state[key] = None
+        st.session_state[key] = None if key != "data_loaded" else False
 
 # Validate on button click
 if st.sidebar.button("🔄 Connect & Validate"):
@@ -77,27 +78,98 @@ qdrant = st.session_state["qdrant_client"]
 COLLECTION_NAME = "rag_demo"
 
 # --- INIT COLLECTION IF NEEDED ---
-existing = qdrant.get_collections().collections
-if not any(c.name == COLLECTION_NAME for c in existing):
-    qdrant.recreate_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-    )
+try:
+    existing = qdrant.get_collections().collections
+    if not any(c.name == COLLECTION_NAME for c in existing):
+        qdrant.recreate_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+        )
+        st.session_state["data_loaded"] = False
+except Exception as e:
+    st.error(f"Error initializing collection: {e}")
 
 # --- EMBEDDING MODEL ---
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-import streamlit as st
+embedder = load_embedder()
 
-# Streamlit file uploader
-uploaded_file = st.file_uploader("Choose a file", type="txt")
-
-if uploaded_file is not None:
-    chunks = []
-    current_chunk = ""
+# --- HELPER FUNCTIONS ---
+def extract_participant_info(content):
+    """Extract structured information from participant content"""
+    info = {}
     
-    # Read the uploaded file content
-    text = uploaded_file.read().decode('utf-8')
+    # Extract name
+    name_match = re.search(r'##\s*Participant\s*\d+:\s*([^\n]+)', content)
+    if name_match:
+        info['name'] = name_match.group(1).strip()
+    
+    # Extract response rate
+    response_rate_match = re.search(r'Response rate:\s*(\d+)%', content)
+    if response_rate_match:
+        info['response_rate'] = int(response_rate_match.group(1))
+    
+    # Extract other fields
+    fields = ['Age', 'Gender', 'Location', 'Studies participated', 'Preferred communication', 
+              'Best response times', 'No-show rate', 'Specialties', 'Education', 'Availability']
+    
+    for field in fields:
+        pattern = rf'\*\*{field}:\*\*\s*([^\n]+)'
+        match = re.search(pattern, content)
+        if match:
+            value = match.group(1).strip()
+            if field == 'No-show rate':
+                # Extract percentage
+                no_show_match = re.search(r'(\d+)%', value)
+                if no_show_match:
+                    info['no_show_rate'] = int(no_show_match.group(1))
+            elif field == 'Studies participated':
+                # Extract number
+                studies_match = re.search(r'(\d+)', value)
+                if studies_match:
+                    info['studies_participated'] = int(studies_match.group(1))
+            elif field == 'Age':
+                # Extract age
+                age_match = re.search(r'(\d+)', value)
+                if age_match:
+                    info['age'] = int(age_match.group(1))
+            else:
+                info[field.lower().replace(' ', '_')] = value
+    
+    return info
+
+def parse_markdown_participants(text):
+    """Parse markdown format participant data"""
+    chunks = []
+    
+    # Split by participant sections
+    sections = re.split(r'##\s*Participant\s*\d+:', text)
+    
+    for i, section in enumerate(sections[1:], 1):  # Skip first empty section
+        if section.strip():
+            # Reconstruct the participant section
+            participant_content = f"## Participant {i:03d}:" + section
+            
+            # Extract structured info
+            info = extract_participant_info(participant_content)
+            
+            chunk = {
+                "content": participant_content.strip(),
+                "metadata": {
+                    "participant_id": f"PARTICIPANT_{i:03d}",
+                    "chunk_type": "participant_profile",
+                    **info
+                }
+            }
+            chunks.append(chunk)
+    
+    return chunks
+
+def parse_text_participants(text):
+    """Parse text format with PARTICIPANT_ markers"""
+    chunks = []
     
     # Split the text by participant markers
     participant_sections = text.split("PARTICIPANT_")[1:]  # Skip first empty element
@@ -108,6 +180,7 @@ if uploaded_file is not None:
             # Handle engagement data separately
             engagement_lines = section.split('\n')
             current_participant = None
+            current_chunk = ""
             
             for line in engagement_lines:
                 if line.strip().startswith("PARTICIPANT_") and "Engagement History:" in line:
@@ -165,45 +238,198 @@ if uploaded_file is not None:
                 }
             })
     
-    # Reset for any remaining content
-    current_chunk = ""
-    
-    st.success(f"Created {len(chunks)} chunks")
-    
-    # Optional: Display some chunks for verification
-    if st.checkbox("Show sample chunks"):
-        for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
-            st.write(f"**Chunk {i+1}:**")
-            st.write(chunk["content"][:200] + "..." if len(chunk["content"]) > 200 else chunk["content"])
-            st.write("Metadata:", chunk["metadata"])
-            st.write("---")
+    return chunks
 
-# --- QUERY ---
+# --- FILE UPLOAD AND PROCESSING ---
+st.header("📁 Upload Research Data")
+uploaded_file = st.file_uploader("Choose a file", type=["txt", "md"])
+
+if uploaded_file is not None:
+    with st.spinner("🔄 Processing file..."):
+        try:
+            # Read the uploaded file content
+            text = uploaded_file.read().decode('utf-8')
+            
+            # Determine file format and parse accordingly
+            if "## Participant" in text:
+                # Markdown format
+                chunks = parse_markdown_participants(text)
+                st.info("📝 Detected markdown format")
+            elif "PARTICIPANT_" in text:
+                # Text format with PARTICIPANT_ markers
+                chunks = parse_text_participants(text)
+                st.info("📄 Detected text format with PARTICIPANT_ markers")
+            else:
+                # Generic text processing
+                chunks = []
+                sentences = text.split('.')
+                for i, sentence in enumerate(sentences):
+                    if sentence.strip():
+                        chunks.append({
+                            "content": sentence.strip(),
+                            "metadata": {
+                                "chunk_id": f"chunk_{i:03d}",
+                                "chunk_type": "generic_text"
+                            }
+                        })
+                st.info("📋 Processed as generic text")
+            
+            st.success(f"✅ Created {len(chunks)} chunks")
+            
+            # Optional: Display some chunks for verification
+            if st.checkbox("Show sample chunks"):
+                for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
+                    st.write(f"**Chunk {i+1}:**")
+                    st.write(chunk["content"][:300] + "..." if len(chunk["content"]) > 300 else chunk["content"])
+                    st.write("**Metadata:**", chunk["metadata"])
+                    st.write("---")
+            
+            # Process and store embeddings
+            if chunks and st.button("🚀 Process & Store Embeddings"):
+                with st.spinner("🔄 Generating embeddings and storing in vector database..."):
+                    try:
+                        # Clear existing collection
+                        qdrant.recreate_collection(
+                            collection_name=COLLECTION_NAME,
+                            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+                        )
+                        
+                        # Generate embeddings and create points
+                        points = []
+                        for i, chunk in enumerate(chunks):
+                            # Generate embedding for the chunk content
+                            embedding = embedder.encode(chunk["content"])
+                            
+                            # Create point for Qdrant
+                            point = PointStruct(
+                                id=str(uuid.uuid4()),
+                                vector=embedding.tolist(),
+                                payload={
+                                    "text": chunk["content"],
+                                    "metadata": chunk["metadata"]
+                                }
+                            )
+                            points.append(point)
+                        
+                        # Upload to Qdrant in batches
+                        batch_size = 100
+                        for i in range(0, len(points), batch_size):
+                            batch = points[i:i + batch_size]
+                            qdrant.upsert(collection_name=COLLECTION_NAME, points=batch)
+                        
+                        st.session_state["data_loaded"] = True
+                        st.success(f"✅ Successfully stored {len(points)} embeddings in Qdrant!")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error storing embeddings: {e}")
+                        st.write("Debug info:", str(e))
+                        
+        except Exception as e:
+            st.error(f"❌ Error processing file: {e}")
+
+# --- QUERY SECTION ---
 st.header("🧠 Ask a Question")
-user_query = st.text_input("Enter your question:")
 
-if st.button("Get RAG Answer", disabled=not user_query.strip()):
+if not st.session_state.get("data_loaded"):
+    st.warning("⚠️ Please upload and process a file first before asking questions.")
+else:
+    st.success("✅ Data loaded and ready for queries!")
+
+user_query = st.text_input("Enter your question:", placeholder="e.g., give me the names of those with at least 50% response rate")
+
+if st.button("Get RAG Answer", disabled=not user_query.strip() or not st.session_state.get("data_loaded")):
     try:
-        query_vec = embedder.encode([user_query])[0]
-        results = qdrant.search(collection_name=COLLECTION_NAME, query_vector=query_vec, limit=5)
-        retrieved_chunks = [hit.payload['text'] for hit in results]
-
-        context = "\n\n".join(retrieved_chunks)
-
-        st.subheader("📚 Retrieved Context")
-        st.write(context)
-
-        prompt = f"Answer the question based on the following context:\n\n{context}\n\nQuestion: {user_query}"
-        with st.spinner("🤖 Thinking..."):
-            response = client.chat.completions.create(
-                model="gpt-4o",  # 👈 GPT-4o used here
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+        with st.spinner("🔍 Searching for relevant information..."):
+            # Generate query embedding
+            query_vec = embedder.encode([user_query])[0]
+            
+            # Search in Qdrant
+            results = qdrant.search(
+                collection_name=COLLECTION_NAME, 
+                query_vector=query_vec, 
+                limit=10,  # Increased limit for better coverage
+                with_payload=True
             )
-            answer = response.choices[0].message.content.strip()
+            
+            # Extract context and metadata
+            retrieved_chunks = []
+            participant_data = []
+            
+            for hit in results:
+                retrieved_chunks.append(hit.payload['text'])
+                metadata = hit.payload.get('metadata', {})
+                if metadata.get('chunk_type') == 'participant_profile':
+                    participant_data.append(metadata)
+            
+            context = "\n\n".join(retrieved_chunks)
+            
+            # Show retrieved context
+            with st.expander("📚 Retrieved Context", expanded=False):
+                st.write(context)
+            
+            # Special handling for structured queries
+            if "response rate" in user_query.lower() and "%" in user_query:
+                # Extract threshold from query
+                threshold_match = re.search(r'(\d+)%', user_query)
+                if threshold_match:
+                    threshold = int(threshold_match.group(1))
+                    
+                    # Filter participants based on response rate
+                    qualified_participants = []
+                    for participant in participant_data:
+                        if participant.get('response_rate', 0) >= threshold:
+                            qualified_participants.append(participant)
+                    
+                    if qualified_participants:
+                        st.subheader("🎯 Direct Results")
+                        names = [p.get('name', 'Unknown') for p in qualified_participants]
+                        st.write(f"**Participants with at least {threshold}% response rate:**")
+                        for name in names:
+                            st.write(f"• {name}")
+                        st.write(f"\n**Total: {len(names)} participants**")
+            
+            # Generate AI response with strict factual constraints
+            prompt = f"""You are a research assistant that MUST be strictly factual and accurate. Follow these critical rules:
 
-        st.subheader("💬 RAG Answer")
-        st.write(answer)
+STRICT CONSTRAINTS:
+1. ONLY use information that is explicitly provided in the context below
+2. NEVER invent, assume, or hallucinate any participant names, data, or details
+3. If information is not available in the context, clearly state "This information is not available in the provided data"
+4. Do not make up response rates, participant counts, or any other statistics
+5. If you cannot find specific information requested, explicitly say so
+6. Only cite participants and data that are explicitly mentioned in the context
+
+Context (Research Participant Data):
+{context}
+
+Question: {user_query}
+
+Provide a clear, structured answer based ONLY on the information explicitly provided in the context above. If any requested information is missing or unclear in the context, clearly state that it's not available rather than guessing or inventing details."""
+
+            with st.spinner("🤖 Generating AI response..."):
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system", 
+                            "content": "You are a factual research assistant. You must ONLY provide information that is explicitly stated in the provided context. Never invent, assume, or hallucinate any details. If information is not available, clearly state that it's not available in the data."
+                        },
+                        {
+                            "role": "user", 
+                            "content": prompt
+                        }
+                    ],
+                    temperature=0.1  # Lower temperature for more factual responses
+                )
+                answer = response.choices[0].message.content.strip()
+
+            st.subheader("💬 AI Response")
+            st.write(answer)
 
     except Exception as e:
-        st.error(f"❌ Error during RAG answering: {e}")
+        st.error(f"❌ Error during RAG query: {e}")
+        st.write("Debug info:", str(e))
+
+# --- FOOTER ---
+st.markdown("---")
+st.markdown("*AIFirst RAG Assistant - Built with Streamlit, OpenAI, and Qdrant*")
