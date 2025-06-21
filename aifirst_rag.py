@@ -240,7 +240,7 @@ def parse_text_participants(text):
     return chunks
 
 # --- FILE UPLOAD AND PROCESSING ---
-st.header("📁 Upload Research Data")
+st.header("📁 Upload Participant Details")
 uploaded_file = st.file_uploader("Choose a file", type=["txt", "md"])
 
 if uploaded_file is not None:
