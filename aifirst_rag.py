@@ -284,9 +284,9 @@ if uploaded_file is not None:
                     st.write("**Metadata:**", chunk["metadata"])
                     st.write("---")
             
-            # Process and store embeddings
-            if chunks and st.button("🚀 Process & Store Embeddings"):
-                with st.spinner("🔄 Generating embeddings and storing in vector database..."):
+            # Automatically process and store embeddings
+            if chunks:
+                with st.spinner("🔄 Automatically processing embeddings and storing in vector database..."):
                     try:
                         # Clear existing collection
                         qdrant.recreate_collection(
@@ -296,7 +296,15 @@ if uploaded_file is not None:
                         
                         # Generate embeddings and create points
                         points = []
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
                         for i, chunk in enumerate(chunks):
+                            # Update progress
+                            progress = (i + 1) / len(chunks)
+                            progress_bar.progress(progress)
+                            status_text.text(f"Processing chunk {i + 1} of {len(chunks)}...")
+                            
                             # Generate embedding for the chunk content
                             embedding = embedder.encode(chunk["content"])
                             
@@ -312,13 +320,19 @@ if uploaded_file is not None:
                             points.append(point)
                         
                         # Upload to Qdrant in batches
+                        status_text.text("Uploading to vector database...")
                         batch_size = 100
                         for i in range(0, len(points), batch_size):
                             batch = points[i:i + batch_size]
                             qdrant.upsert(collection_name=COLLECTION_NAME, points=batch)
                         
+                        # Clean up progress indicators
+                        progress_bar.empty()
+                        status_text.empty()
+                        
                         st.session_state["data_loaded"] = True
-                        st.success(f"✅ Successfully stored {len(points)} embeddings in Qdrant!")
+                        st.success(f"✅ Automatically processed and stored {len(points)} embeddings in Qdrant!")
+                        st.balloons()  # Celebration effect
                         
                     except Exception as e:
                         st.error(f"❌ Error storing embeddings: {e}")
@@ -424,6 +438,7 @@ Provide a clear, structured answer based ONLY on the information explicitly prov
                 answer = response.choices[0].message.content.strip()
 
             st.subheader("💬 AI Response")
+            st.info("ℹ️ This response is based strictly on the uploaded data. No information has been invented or assumed.")
             st.write(answer)
 
     except Exception as e:
